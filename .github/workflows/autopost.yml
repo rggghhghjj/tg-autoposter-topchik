@@ -1,0 +1,27 @@
+name: autopost-telegram
+
+on:
+  schedule:
+    - cron: "30 6 * * *"   # каждый день в 06:30 UTC (это примерно 09:30 по Москве)
+  workflow_dispatch: {}     # позволит запускать вручную
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Run bot
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          CHANNEL_ID: ${{ secrets.CHANNEL_ID }}
+        run: python bot.py
