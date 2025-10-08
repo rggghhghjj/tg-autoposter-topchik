@@ -1,0 +1,3 @@
+date,title,text,image_url,button_text,button_url,tags
+2025-10-09,Тестовый пост,"Это тест: проверяем, что бот умеет постить картинку, текст и кнопку.",https://picsum.photos/1200/675?random=100,Открыть,https://yandex.ru,#тест #bot
+2025-10-10,Пример поста,"Здесь будет реальный товар и ваша партнёрская ссылка.",https://picsum.photos/1200/675?random=101,Посмотреть на Маркете,https://market.yandex.ru,#пример
