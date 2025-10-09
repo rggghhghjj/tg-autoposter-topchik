@@ -2,8 +2,15 @@ name: autopost-telegram
 
 on:
   schedule:
-    - cron: "30 6 * * *"   # каждый день в 06:30 UTC (это примерно 09:30 по Москве)
-  workflow_dispatch: {}     # позволит запускать вручную
+    # Время в UTC (Москва = UTC+3)
+    - cron: "30 6 * * *"
+    - cron: "30 10 * * *"
+    - cron: "30 14 * * *"
+    - cron: "30 18 * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
 
 jobs:
   run:
@@ -17,11 +24,22 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install dependencies
-        run: pip install requests
+      - name: Install deps
+        run: pip install requests beautifulsoup4 lxml
 
-      - name: Run bot
+      - name: Run auto poster
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           CHANNEL_ID: ${{ secrets.CHANNEL_ID }}
-        run: python bot.py
+          AFFIL_TEMPLATE: ${{ secrets.AFFIL_TEMPLATE }}
+          CATEGORY_URL: ${{ secrets.CATEGORY_URL }}
+          POSTS_PER_RUN: ${{ secrets.POSTS_PER_RUN }}
+        run: python auto_poster.py
+
+      - name: Save posted.json
+        run: |
+          git config user.name "gh-actions"
+          git config user.email "actions@github.com"
+          git add posted.json || true
+          git commit -m "Update posted.json" || echo "nothing to commit"
+          git push || echo "nothing to push"
