@@ -970,21 +970,11 @@ jobs:
               restFlowActive = if (connected) false else _ui.value.restFlowActive'''
           )
 
-          old='''        val analyzed = cachedUniverse.map { market ->
-              scope.async {
-                  semaphore.withPermit {
-                      runCatching {
-                          val candles = if (market.symbol == "BTCUSDT" && btcCandles.isNotEmpty()) btcCandles
-                          else api.loadKlines(market.symbol, "1m", 150)
-                          candlesBySymbol[market.symbol] = candles
-                          SignalEngine.analyze(market.symbol, candles, tracker.snapshot(market.symbol), regime, now)
-                      }.getOrNull()
-                  }
-              }
-          }.awaitAll().filterNotNull()
-
-          val stateful = applyLifecycle(analyzed, now)'''
-          new='''        var analyzed = cachedUniverse.map { market ->
+          pattern = re.compile(
+              r'''(?ms)^(\s*)val analyzed = cachedUniverse\.map \{ market ->\s*scope\.async \{\s*semaphore\.withPermit \{\s*runCatching \{\s*val candles = if \(market\.symbol == "BTCUSDT" && btcCandles\.isNotEmpty\(\)\) btcCandles\s*else api\.loadKlines\(market\.symbol, "1m", 150\)\s*candlesBySymbol\[market\.symbol\] = candles\s*SignalEngine\.analyze\(market\.symbol, candles, tracker\.snapshot\(market\.symbol\), regime, now\)\s*\}\.getOrNull\(\)\s*\}\s*\}\s*\}\.awaitAll\(\)\.filterNotNull\(\)\s*\n\s*val stateful = applyLifecycle\(analyzed, now\)''',
+              re.MULTILINE
+          )
+          replacement = '''        var analyzed = cachedUniverse.map { market ->
               scope.async {
                   semaphore.withPermit {
                       runCatching {
@@ -1041,9 +1031,9 @@ jobs:
           }
 
           val stateful = applyLifecycle(analyzed, now)'''
-          if old not in s:
-              raise SystemExit("scanner analyze block not found")
-          s=s.replace(old,new)
+          s, n = pattern.subn(replacement, s, count=1)
+          if n != 1:
+              raise SystemExit("scanner analyze regex not found")
 
           s=s.replace(
               '''            websocketConnected = false, status = "Сканер остановлен")''',
