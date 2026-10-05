@@ -14,7 +14,7 @@ permissions:
 
 jobs:
   build:
-    runs-on: macos-latest
+    runs-on: macos-15-intel
     timeout-minutes: 30
 
     steps:
@@ -27,6 +27,17 @@ jobs:
           cat .ci/scalp-v02.part0 .ci/scalp-v02.part1 .ci/scalp-v02.part2 .ci/scalp-v02.part3 .ci/scalp-v02.part4 | base64 --decode > /tmp/scalp-v02.zip
           echo "3b654cc6918fe1ccff2dece2502db5d97bf9dc7583f38673cefab400efe0cc8c  /tmp/scalp-v02.zip" | shasum -a 256 -c -
           unzip -q /tmp/scalp-v02.zip
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path("ScalpSignalAndroid/app/src/main/java/com/scalpsignal/mobile/domain/SignalEngine.kt")
+          s=p.read_text(encoding="utf-8")
+          old="val confirmed = crossed && normalized >= 76"
+          new="val confirmed = crossed && distanceAtr in 0.04..1.10 && normalized >= 76"
+          if old not in s and new not in s:
+              raise SystemExit("freshness patch target missing")
+          p.write_text(s.replace(old,new), encoding="utf-8")
+          PY
+          grep -q 'distanceAtr in 0.04..1.10' ScalpSignalAndroid/app/src/main/java/com/scalpsignal/mobile/domain/SignalEngine.kt
           test -f ScalpSignalAndroid/settings.gradle.kts
           grep -q 'symbol == "SKYAIUSDT"' ScalpSignalAndroid/app/src/main/java/com/scalpsignal/mobile/domain/SignalEngine.kt
           grep -q 'versionName = "0.2.0"' ScalpSignalAndroid/app/build.gradle.kts
