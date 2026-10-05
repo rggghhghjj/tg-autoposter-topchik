@@ -453,23 +453,21 @@ jobs:
           p=root/"app/src/main/java/com/scalpsignal/mobile/MainActivity.kt"
           s=p.read_text(encoding="utf-8")
           s=s.replace('Text("SCALP SIGNAL", fontWeight = FontWeight.Black)', 'Text("SCALP SIGNAL TV", fontWeight = FontWeight.Black)')
-          old='''                    TradingViewChart(
-                        symbol = signal.symbol,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(430.dp)
-                    )'''
-          new='''                    NativeTradingViewChart(
+          s, n = re.subn(
+              r'''(?ms)TradingViewChart\(\s*symbol\s*=\s*signal\.symbol,\s*modifier\s*=\s*Modifier\s*\.fillMaxWidth\(\)\s*\.height\(430\.dp\)\s*\)''',
+              '''NativeTradingViewChart(
                         symbol = signal.symbol,
                         candles = state.selectedCandles,
                         signal = signal,
                         modifier = Modifier
                             .fillMaxWidth()
                             .height(430.dp)
-                    )'''
-          if old not in s:
-              raise SystemExit("TradingView call not found")
-          s=s.replace(old,new)
+                    )''',
+              s,
+              count=1
+          )
+          if n != 1:
+              raise SystemExit("TradingView call regex not found")
           p.write_text(s, encoding="utf-8")
 
           native = r'''package com.scalpsignal.mobile
