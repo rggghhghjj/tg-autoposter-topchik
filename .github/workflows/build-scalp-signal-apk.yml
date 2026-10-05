@@ -8,6 +8,8 @@ on:
     branches:
       - main
   workflow_dispatch:
+  issues:
+    types: [opened]
 
 jobs:
   build-apk:
