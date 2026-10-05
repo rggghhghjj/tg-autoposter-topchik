@@ -198,6 +198,9 @@ jobs:
           }
           '''
           s=s[:start]+widget+s[end:]
+          s=s.replace('item { SignalHero(signal) }','item { SignalHero(signal, state.websocketConnected) }')
+          s=s.replace('private fun SignalHero(signal: ScalpingSignal) {','private fun SignalHero(signal: ScalpingSignal, websocketLive: Boolean) {')
+          s=s.replace('Stat("LIVE Δ", "${signed(signal.liveFlowDeltaPct)}%")','Stat("LIVE Δ", if (websocketLive) "${signed(signal.liveFlowDeltaPct)}%" else "—")')
           p.write_text(s, encoding="utf-8")
 
           # Stable reconnecting Binance WebSocket
@@ -405,8 +408,9 @@ jobs:
                       (liveDeltaAligned >= 6.0 || candleDeltaAligned >= 12.0) &&
                       (tf3Aligned || tf5Aligned) && !(market.shock && !marketAligned)''',
               '''        val liveFlowFresh = flow.updatedAt > 0L && System.currentTimeMillis() - flow.updatedAt <= 20_000L
+                  val strongLevel = level.touches >= 2 || (normalized >= 88 && volumeRatio >= 2.2 && liveDeltaAligned >= 20.0)
                   val confirmed = crossed && distanceAtr in 0.04..1.10 && normalized >= 76 && volumeRatio >= 1.35 &&
-                      liveFlowFresh && (liveDeltaAligned >= 6.0 || bigPlayerAligned) &&
+                      strongLevel && liveFlowFresh && (liveDeltaAligned >= 6.0 || bigPlayerAligned) &&
                       (tf3Aligned || tf5Aligned) && !(market.shock && !marketAligned)'''
           )
           s=s.replace(
@@ -425,6 +429,7 @@ jobs:
           grep -q 'versionName = "0.3.0"' ScalpSignalAndroid/app/build.gradle.kts
           grep -q 'TradingViewChart' ScalpSignalAndroid/app/src/main/java/com/scalpsignal/mobile/MainActivity.kt
           grep -q 'liveFlowFresh' ScalpSignalAndroid/app/src/main/java/com/scalpsignal/mobile/domain/SignalEngine.kt
+          grep -q 'strongLevel' ScalpSignalAndroid/app/src/main/java/com/scalpsignal/mobile/domain/SignalEngine.kt
           grep -q 'scheduleReconnect' ScalpSignalAndroid/app/src/main/java/com/scalpsignal/mobile/data/BinanceTradeStream.kt
 
       - name: Set up JDK 17
