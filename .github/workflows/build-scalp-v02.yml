@@ -1,0 +1,74 @@
+name: Build Scalp Signal v0.2 APK
+
+on:
+  push:
+    branches:
+      - build-scalp-signal-apk
+    paths:
+      - .github/workflows/build-scalp-v02.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Restore v0.2 source
+        run: |
+          cat .ci/scalp-v02.part0 .ci/scalp-v02.part1 .ci/scalp-v02.part2 .ci/scalp-v02.part3 .ci/scalp-v02.part4 | base64 --decode > /tmp/scalp-v02.zip
+          echo "3b654cc6918fe1ccff2dece2502db5d97bf9dc7583f38673cefab400efe0cc8c  /tmp/scalp-v02.zip" | sha256sum -c -
+          unzip -q /tmp/scalp-v02.zip
+          test -f ScalpSignalAndroid/settings.gradle.kts
+          grep -q 'symbol == "SKYAIUSDT"' ScalpSignalAndroid/app/src/main/java/com/scalpsignal/mobile/domain/SignalEngine.kt
+          grep -q 'versionName = "0.2.0"' ScalpSignalAndroid/app/build.gradle.kts
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Install Android SDK 36
+        env:
+          ANDROID_HOME: /usr/local/lib/android/sdk
+          ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
+        run: |
+          SDKMANAGER="$(command -v sdkmanager || true)"
+          if [ -z "$SDKMANAGER" ]; then
+            SDKMANAGER="$(find /usr/local/lib/android/sdk/cmdline-tools -type f -name sdkmanager | head -1)"
+          fi
+          test -x "$SDKMANAGER"
+          yes | "$SDKMANAGER" --licenses >/dev/null || true
+          "$SDKMANAGER" "platforms;android-36" "build-tools;36.0.0"
+
+      - name: Set up Gradle 8.13
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.13'
+
+      - name: Build APK
+        run: gradle --no-daemon -p ScalpSignalAndroid :app:assembleDebug
+
+      - name: Validate APK
+        run: |
+          APK="ScalpSignalAndroid/app/build/outputs/apk/debug/app-debug.apk"
+          test -s "$APK"
+          mkdir -p dist
+          cp "$APK" dist/ScalpSignal-v0.2.apk
+          unzip -tq dist/ScalpSignal-v0.2.apk
+          sha256sum dist/ScalpSignal-v0.2.apk
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: ScalpSignal-v0.2-APK
+          path: dist/ScalpSignal-v0.2.apk
+          if-no-files-found: error
+          retention-days: 7
