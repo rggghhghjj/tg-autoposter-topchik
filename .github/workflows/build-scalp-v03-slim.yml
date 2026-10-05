@@ -1,0 +1,466 @@
+name: Build Scalp Signal v0.3 TradingView Slim
+
+on:
+  push:
+    branches:
+      - build-scalp-signal-apk
+    paths:
+      - .github/workflows/build-scalp-v03-slim.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-slim
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Restore verified v0.2 base
+        shell: bash
+        run: |
+          cat .ci/scalp-v02.part0 .ci/scalp-v02.part1 .ci/scalp-v02.part2 .ci/scalp-v02.part3 .ci/scalp-v02.part4 | base64 --decode > /tmp/scalp-v02.zip
+          echo "3b654cc6918fe1ccff2dece2502db5d97bf9dc7583f38673cefab400efe0cc8c  /tmp/scalp-v02.zip" | shasum -a 256 -c -
+          unzip -q /tmp/scalp-v02.zip
+
+      - name: Patch v0.3 TradingView and WebSocket
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          root=Path("ScalpSignalAndroid")
+
+          # Version
+          p=root/"app/build.gradle.kts"
+          s=p.read_text(encoding="utf-8")
+          s=s.replace('versionCode = 2','versionCode = 3').replace('versionName = "0.2.0"','versionName = "0.3.0"')
+          p.write_text(s, encoding="utf-8")
+
+          # MainActivity: replace handmade chart with TradingView widget and fix buttons
+          p=root/"app/src/main/java/com/scalpsignal/mobile/MainActivity.kt"
+          s=p.read_text(encoding="utf-8")
+          s=s.replace('import android.net.Uri\n', 'import android.net.Uri\nimport android.webkit.CookieManager\nimport android.webkit.WebSettings\nimport android.webkit.WebView\nimport android.webkit.WebViewClient\n')
+          s=s.replace('import androidx.compose.ui.platform.LocalContext\n', 'import androidx.compose.ui.platform.LocalContext\nimport androidx.compose.ui.viewinterop.AndroidView\n')
+
+          s, n = re.subn(
+              r'''(?ms)^\s{16}item \{\s*CandlestickChart\(\s*candles = state\.selectedCandles,\s*signal = signal,\s*modifier = Modifier\s*\.fillMaxWidth\(\)\s*\.height\(300\.dp\)\s*\)\s*\}''',
+              '''                item {
+                    TradingViewChart(
+                        symbol = signal.symbol,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(430.dp)
+                    )
+                }''',
+              s,
+              count=1
+          )
+          if n != 1: raise SystemExit("chart call regex not found")
+
+          s, n = re.subn(
+              r'''(?ms)^\s{12}Row\(horizontalArrangement = Arrangement\.spacedBy\(8\.dp\)\) \{\s*Button\(onClick = \{.*?Text\("Tiger\.com"\)\s*\}\s*\}''',
+              '''            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Button(
+                    modifier = Modifier.weight(1f),
+                    onClick = {
+                        val clip = ClipData.newPlainText("symbol", signal.symbol)
+                        context.getSystemService(ClipboardManager::class.java)?.setPrimaryClip(clip)
+                    }
+                ) {
+                    Icon(Icons.Default.ContentCopy, null)
+                    Spacer(Modifier.width(6.dp))
+                    Text("Копировать", maxLines = 1)
+                }
+                OutlinedButton(
+                    modifier = Modifier.weight(1f),
+                    onClick = {
+                        val intent = Intent(Intent.ACTION_VIEW, Uri.parse("https://www.tiger.com/terminal"))
+                        context.startActivity(intent)
+                    }
+                ) {
+                    Icon(Icons.Default.OpenInNew, null)
+                    Spacer(Modifier.width(6.dp))
+                    Text("Tiger.com", maxLines = 1)
+                }
+            }''',
+              s,
+              count=1
+          )
+          if n != 1: raise SystemExit("buttons regex not found")
+
+          start=s.index('@Composable\nprivate fun CandlestickChart')
+          end=s.index('\nprivate fun one', start)
+          widget=r'''@Composable
+          private fun TradingViewChart(symbol: String, modifier: Modifier = Modifier) {
+              ElevatedCard(modifier = modifier) {
+                  AndroidView(
+                      modifier = Modifier.fillMaxSize(),
+                      factory = { context ->
+                          WebView(context).apply {
+                              setBackgroundColor(android.graphics.Color.rgb(15, 17, 23))
+                              webViewClient = WebViewClient()
+                              settings.javaScriptEnabled = true
+                              settings.domStorageEnabled = true
+                              settings.cacheMode = WebSettings.LOAD_DEFAULT
+                              settings.mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
+                              settings.setSupportZoom(false)
+                              settings.builtInZoomControls = false
+                              CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
+                              tag = symbol
+                              loadDataWithBaseURL(
+                                  "https://s3.tradingview.com/",
+                                  tradingViewHtml(symbol),
+                                  "text/html",
+                                  "UTF-8",
+                                  null
+                              )
+                          }
+                      },
+                      update = { webView ->
+                          if (webView.tag != symbol) {
+                              webView.tag = symbol
+                              webView.loadDataWithBaseURL(
+                                  "https://s3.tradingview.com/",
+                                  tradingViewHtml(symbol),
+                                  "text/html",
+                                  "UTF-8",
+                                  null
+                              )
+                          }
+                      }
+                  )
+              }
+          }
+
+          private fun tradingViewHtml(symbol: String): String {
+              val tvSymbol = "BINANCE:${symbol.uppercase()}.P"
+              return """
+                  <!doctype html>
+                  <html>
+                  <head>
+                    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+                    <style>
+                      html, body, .tradingview-widget-container, .tradingview-widget-container__widget {
+                        width: 100%; height: 100%; margin: 0; padding: 0; overflow: hidden; background: #0f1117;
+                      }
+                    </style>
+                  </head>
+                  <body>
+                    <div class="tradingview-widget-container">
+                      <div class="tradingview-widget-container__widget"></div>
+                      <script type="text/javascript" src="https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js" async>
+                      {
+                        "autosize": true,
+                        "symbol": "$tvSymbol",
+                        "interval": "1",
+                        "timezone": "Etc/UTC",
+                        "theme": "dark",
+                        "style": "1",
+                        "locale": "ru",
+                        "allow_symbol_change": false,
+                        "hide_top_toolbar": false,
+                        "hide_legend": false,
+                        "save_image": false,
+                        "calendar": false,
+                        "support_host": "https://www.tradingview.com"
+                      }
+                      </script>
+                    </div>
+                  </body>
+                  </html>
+              """.trimIndent()
+          }
+          '''
+          s=s[:start]+widget+s[end:]
+          s=s.replace('item { SignalHero(signal) }','item { SignalHero(signal, state.websocketConnected) }')
+          s=s.replace('private fun SignalHero(signal: ScalpingSignal) {','private fun SignalHero(signal: ScalpingSignal, websocketLive: Boolean) {')
+          s=s.replace('Stat("LIVE Δ", "${signed(signal.liveFlowDeltaPct)}%")','Stat("LIVE Δ", if (websocketLive) "${signed(signal.liveFlowDeltaPct)}%" else "—")')
+          p.write_text(s, encoding="utf-8")
+
+          # Stable reconnecting Binance WebSocket
+          p=root/"app/src/main/java/com/scalpsignal/mobile/data/BinanceTradeStream.kt"
+          p.write_text(r'''package com.scalpsignal.mobile.data
+
+          import okhttp3.OkHttpClient
+          import okhttp3.Request
+          import okhttp3.Response
+          import okhttp3.WebSocket
+          import okhttp3.WebSocketListener
+          import org.json.JSONObject
+          import java.util.concurrent.Executors
+          import java.util.concurrent.ScheduledFuture
+          import java.util.concurrent.TimeUnit
+          import java.util.concurrent.atomic.AtomicBoolean
+          import java.util.concurrent.atomic.AtomicLong
+          import kotlin.math.min
+
+          class BinanceTradeStream(
+              private val tracker: MicrostructureTracker,
+              private val onConnection: (Boolean, String) -> Unit
+          ) {
+              private val client = OkHttpClient.Builder()
+                  .pingInterval(30, TimeUnit.SECONDS)
+                  .connectTimeout(12, TimeUnit.SECONDS)
+                  .readTimeout(0, TimeUnit.MILLISECONDS)
+                  .retryOnConnectionFailure(true)
+                  .build()
+
+              private val scheduler = Executors.newSingleThreadScheduledExecutor()
+              private var reconnectFuture: ScheduledFuture<*>? = null
+              private var socket: WebSocket? = null
+              private val connected = AtomicBoolean(false)
+              private val requestId = AtomicLong(1)
+              @Volatile private var desiredSymbols: Set<String> = emptySet()
+              @Volatile private var manualClose = false
+              @Volatile private var reconnectAttempt = 0
+
+              fun isConnected(): Boolean = connected.get()
+
+              @Synchronized
+              fun connect(symbols: Collection<String>) {
+                  desiredSymbols = symbols.map { it.lowercase() }.toSet()
+                  manualClose = false
+                  reconnectFuture?.cancel(false)
+                  reconnectFuture = null
+                  if (connected.get() && socket != null) {
+                      updateSymbols(desiredSymbols)
+                      return
+                  }
+                  openSocket()
+              }
+
+              @Synchronized
+              fun updateSymbols(symbols: Collection<String>) {
+                  val next = symbols.map { it.lowercase() }.toSet()
+                  val previous = desiredSymbols
+                  desiredSymbols = next
+                  if (!connected.get() || socket == null) {
+                      scheduleReconnect(0)
+                      return
+                  }
+                  val remove = previous - next
+                  val add = next - previous
+                  if (remove.isNotEmpty()) send(socket, "UNSUBSCRIBE", remove)
+                  if (add.isNotEmpty()) send(socket, "SUBSCRIBE", add)
+              }
+
+              @Synchronized
+              fun close() {
+                  manualClose = true
+                  reconnectFuture?.cancel(false)
+                  reconnectFuture = null
+                  connected.set(false)
+                  val current = socket
+                  socket = null
+                  current?.close(1000, "scanner stopped")
+                  onConnection(false, "WebSocket остановлен")
+              }
+
+              @Synchronized
+              private fun openSocket() {
+                  if (manualClose || desiredSymbols.isEmpty()) return
+                  val old = socket
+                  socket = null
+                  old?.cancel()
+                  connected.set(false)
+                  onConnection(false, "WebSocket подключается…")
+                  val request = Request.Builder().url("wss://fstream.binance.com/ws").build()
+                  val newSocket = client.newWebSocket(request, listener())
+                  socket = newSocket
+              }
+
+              @Synchronized
+              private fun scheduleReconnect(delaySeconds: Long? = null) {
+                  if (manualClose || desiredSymbols.isEmpty()) return
+                  if (reconnectFuture?.isDone == false) return
+                  val delay = delaySeconds ?: min(30L, 1L shl min(reconnectAttempt, 5))
+                  reconnectAttempt = min(reconnectAttempt + 1, 6)
+                  onConnection(false, "WebSocket reconnect ${delay}s")
+                  reconnectFuture = scheduler.schedule({
+                      synchronized(this) {
+                          reconnectFuture = null
+                          if (!manualClose) openSocket()
+                      }
+                  }, delay, TimeUnit.SECONDS)
+              }
+
+              private fun send(target: WebSocket?, method: String, symbols: Collection<String>) {
+                  if (target == null || symbols.isEmpty()) return
+                  val params = symbols.map { "$it@aggTrade" }
+                  val json = JSONObject()
+                      .put("method", method)
+                      .put("params", params)
+                      .put("id", requestId.getAndIncrement())
+                  target.send(json.toString())
+              }
+
+              private fun listener() = object : WebSocketListener() {
+                  override fun onOpen(webSocket: WebSocket, response: Response) {
+                      synchronized(this@BinanceTradeStream) {
+                          if (webSocket !== socket || manualClose) {
+                              webSocket.close(1000, "stale socket")
+                              return
+                          }
+                          connected.set(true)
+                          reconnectAttempt = 0
+                          reconnectFuture?.cancel(false)
+                          reconnectFuture = null
+                      }
+                      onConnection(true, "WebSocket LIVE")
+                      send(webSocket, "SUBSCRIBE", desiredSymbols)
+                  }
+
+                  override fun onMessage(webSocket: WebSocket, text: String) {
+                      if (webSocket !== socket) return
+                      runCatching {
+                          val o = JSONObject(text)
+                          if (o.optString("e") != "aggTrade") return
+                          val symbol = o.optString("s")
+                          val price = o.optString("p").toDoubleOrNull() ?: return
+                          val qty = o.optString("q").toDoubleOrNull() ?: return
+                          val buyerIsMaker = o.optBoolean("m", false)
+                          val time = o.optLong("T", System.currentTimeMillis())
+                          tracker.add(symbol, AggTradeTick(time, price * qty, buyerAggressor = !buyerIsMaker))
+                      }
+                  }
+
+                  override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
+                      if (webSocket !== socket) return
+                      connected.set(false)
+                      webSocket.close(code, reason)
+                      if (!manualClose) scheduleReconnect()
+                  }
+
+                  override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+                      synchronized(this@BinanceTradeStream) {
+                          if (webSocket !== socket) return
+                          connected.set(false)
+                          socket = null
+                      }
+                      if (!manualClose) scheduleReconnect()
+                  }
+
+                  override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                      synchronized(this@BinanceTradeStream) {
+                          if (webSocket !== socket) return
+                          connected.set(false)
+                          socket = null
+                      }
+                      if (!manualClose) scheduleReconnect()
+                  }
+              }
+          }
+          ''', encoding="utf-8")
+
+          # Repository: never overwrite trading status with transient WS text
+          p=root/"app/src/main/java/com/scalpsignal/mobile/ScannerRepository.kt"
+          s=p.read_text(encoding="utf-8")
+          s=s.replace('    val websocketConnected: Boolean = false,\n', '    val websocketConnected: Boolean = false,\n    val websocketStatus: String = "OFF",\n')
+          old='''    private val stream = BinanceTradeStream(tracker) { connected, message ->
+                  _ui.value = _ui.value.copy(websocketConnected = connected, status = if (connected) _ui.value.status else message)
+              }'''
+          new='''    private val stream = BinanceTradeStream(tracker) { connected, message ->
+                  _ui.value = _ui.value.copy(
+                      websocketConnected = connected,
+                      websocketStatus = if (connected) "LIVE" else message
+                  )
+              }'''
+          if old not in s: raise SystemExit("stream callback not found")
+          s=s.replace(old,new)
+          p.write_text(s, encoding="utf-8")
+
+          # UI label
+          p=root/"app/src/main/java/com/scalpsignal/mobile/MainActivity.kt"
+          s=p.read_text(encoding="utf-8").replace('Stat("WS", if (state.websocketConnected) "LIVE" else "OFF")','Stat("WS", if (state.websocketConnected) "LIVE" else "RETRY")')
+          p.write_text(s, encoding="utf-8")
+
+          # Signal quality: no confirmed NEW without fresh live tape
+          p=root/"app/src/main/java/com/scalpsignal/mobile/domain/SignalEngine.kt"
+          s=p.read_text(encoding="utf-8")
+          s=s.replace(
+              '''        val confirmed = crossed && normalized >= 76 && volumeRatio >= 1.35 &&
+                      (liveDeltaAligned >= 6.0 || candleDeltaAligned >= 12.0) &&
+                      (tf3Aligned || tf5Aligned) && !(market.shock && !marketAligned)''',
+              '''        val liveFlowFresh = flow.updatedAt > 0L && System.currentTimeMillis() - flow.updatedAt <= 20_000L
+                  val strongLevel = level.touches >= 2 || (normalized >= 88 && volumeRatio >= 2.2 && liveDeltaAligned >= 20.0)
+                  val confirmed = crossed && distanceAtr in 0.04..1.10 && normalized >= 76 && volumeRatio >= 1.35 &&
+                      strongLevel && liveFlowFresh && (liveDeltaAligned >= 6.0 || bigPlayerAligned) &&
+                      (tf3Aligned || tf5Aligned) && !(market.shock && !marketAligned)'''
+          )
+          s=s.replace(
+              '''        val confirmed = crossed && distanceAtr in 0.04..1.10 && normalized >= 76 && volumeRatio >= 1.35 &&
+                      (liveDeltaAligned >= 6.0 || candleDeltaAligned >= 12.0) &&
+                      (tf3Aligned || tf5Aligned) && !(market.shock && !marketAligned)''',
+              '''        val liveFlowFresh = flow.updatedAt > 0L && System.currentTimeMillis() - flow.updatedAt <= 20_000L
+                  val confirmed = crossed && distanceAtr in 0.04..1.10 && normalized >= 76 && volumeRatio >= 1.35 &&
+                      liveFlowFresh && (liveDeltaAligned >= 6.0 || bigPlayerAligned) &&
+                      (tf3Aligned || tf5Aligned) && !(market.shock && !marketAligned)'''
+          )
+          if 'liveFlowFresh' not in s: raise SystemExit("live flow patch failed")
+          p.write_text(s, encoding="utf-8")
+          PY
+
+          grep -q 'versionName = "0.3.0"' ScalpSignalAndroid/app/build.gradle.kts
+          grep -q 'TradingViewChart' ScalpSignalAndroid/app/src/main/java/com/scalpsignal/mobile/MainActivity.kt
+          grep -q 'liveFlowFresh' ScalpSignalAndroid/app/src/main/java/com/scalpsignal/mobile/domain/SignalEngine.kt
+          grep -q 'strongLevel' ScalpSignalAndroid/app/src/main/java/com/scalpsignal/mobile/domain/SignalEngine.kt
+          grep -q 'scheduleReconnect' ScalpSignalAndroid/app/src/main/java/com/scalpsignal/mobile/data/BinanceTradeStream.kt
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Install Android SDK 36
+        shell: bash
+        run: |
+          mkdir -p "$HOME/android-sdk/cmdline-tools"
+          curl -fL --retry 3 -o /tmp/cmdtools.zip "https://dl.google.com/android/repository/commandlinetools-linux-15859902_latest.zip"
+          echo "4e4c464f145a7512b57d088ac6c278c03c9eea610886b35a5e0804e74eedf583  /tmp/cmdtools.zip" | sha256sum -c -
+          unzip -q /tmp/cmdtools.zip -d /tmp/cmdtools
+          mv /tmp/cmdtools/cmdline-tools "$HOME/android-sdk/cmdline-tools/latest"
+          export ANDROID_HOME="$HOME/android-sdk"
+          export ANDROID_SDK_ROOT="$HOME/android-sdk"
+          export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:$PATH"
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platforms;android-36" "build-tools;36.0.0"
+          echo "ANDROID_HOME=$ANDROID_HOME" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT" >> "$GITHUB_ENV"
+          echo "$ANDROID_HOME/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
+          echo "$ANDROID_HOME/platform-tools" >> "$GITHUB_PATH"
+
+      - name: Set up Gradle 8.13
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.13'
+
+      - name: Build APK
+        shell: bash
+        run: gradle --no-daemon -p ScalpSignalAndroid :app:assembleDebug
+
+      - name: Validate APK
+        shell: bash
+        run: |
+          APK="ScalpSignalAndroid/app/build/outputs/apk/debug/app-debug.apk"
+          test -s "$APK"
+          mkdir -p dist
+          cp "$APK" dist/ScalpSignal-v0.3-TradingView.apk
+          unzip -tq dist/ScalpSignal-v0.3-TradingView.apk
+          shasum -a 256 dist/ScalpSignal-v0.3-TradingView.apk
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: ScalpSignal-v0.3-TradingView-APK-Slim
+          path: dist/ScalpSignal-v0.3-TradingView.apk
+          if-no-files-found: error
+          retention-days: 7
