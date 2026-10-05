@@ -438,6 +438,8 @@ jobs:
           unzip -q /tmp/scalp-project.zip -d "$GITHUB_WORKSPACE"
           test -f ScalpSignalAndroid/settings.gradle.kts
           grep -q 'symbol != "SKYAIUSDT"' ScalpSignalAndroid/app/src/main/java/com/scalpsignal/mobile/data/BinanceApi.kt
+          sed -i '/^[[:space:]]*kotlinOptions {$/,/^[[:space:]]*}$/d' ScalpSignalAndroid/app/build.gradle.kts
+          printf '\nkotlin {\n    compilerOptions {\n        jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)\n    }\n}\n' >> ScalpSignalAndroid/app/build.gradle.kts
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
