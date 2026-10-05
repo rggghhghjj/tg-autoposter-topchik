@@ -6,6 +6,7 @@ on:
       - build-scalp-signal-apk
     paths:
       - .github/workflows/build-scalp-v02-macos.yml
+      - .ci/scalp-v02.part*
   workflow_dispatch:
 
 permissions:
