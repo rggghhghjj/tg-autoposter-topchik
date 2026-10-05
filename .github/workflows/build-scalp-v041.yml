@@ -1,0 +1,1125 @@
+name: Build Scalp Signal TV v0.4.1
+
+on:
+  push:
+    branches:
+      - build-scalp-signal-apk
+    paths:
+      - .github/workflows/build-scalp-v041.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-15-intel
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Restore verified v0.2 base
+        shell: bash
+        run: |
+          cat .ci/scalp-v02.part0 .ci/scalp-v02.part1 .ci/scalp-v02.part2 .ci/scalp-v02.part3 .ci/scalp-v02.part4 | base64 --decode > /tmp/scalp-v02.zip
+          echo "3b654cc6918fe1ccff2dece2502db5d97bf9dc7583f38673cefab400efe0cc8c  /tmp/scalp-v02.zip" | shasum -a 256 -c -
+          unzip -q /tmp/scalp-v02.zip
+
+      - name: Patch v0.3 TradingView and WebSocket
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          root=Path("ScalpSignalAndroid")
+
+          # Version
+          p=root/"app/build.gradle.kts"
+          s=p.read_text(encoding="utf-8")
+          s=s.replace('versionCode = 2','versionCode = 31').replace('versionName = "0.2.0"','versionName = "0.3.1-TV"')
+          s=s.replace('applicationId = "com.scalpsignal.mobile"','applicationId = "com.scalpsignal.mobile.tv"')
+          p.write_text(s, encoding="utf-8")
+
+          # Distinct app label so Android cannot confuse it with the old build
+          p=root/"app/src/main/AndroidManifest.xml"
+          s=p.read_text(encoding="utf-8")
+          s=s.replace('android:label="Scalp Signal"','android:label="Scalp Signal TV"')
+          p.write_text(s, encoding="utf-8")
+
+          # MainActivity: replace handmade chart with TradingView widget and fix buttons
+          p=root/"app/src/main/java/com/scalpsignal/mobile/MainActivity.kt"
+          s=p.read_text(encoding="utf-8")
+          s=s.replace('import android.net.Uri\n', 'import android.net.Uri\nimport android.webkit.CookieManager\nimport android.webkit.WebSettings\nimport android.webkit.WebView\nimport android.webkit.WebViewClient\n')
+          s=s.replace('import androidx.compose.ui.platform.LocalContext\n', 'import androidx.compose.ui.platform.LocalContext\nimport androidx.compose.ui.viewinterop.AndroidView\n')
+
+          s, n = re.subn(
+              r'''(?ms)^\s{16}item \{\s*CandlestickChart\(\s*candles = state\.selectedCandles,\s*signal = signal,\s*modifier = Modifier\s*\.fillMaxWidth\(\)\s*\.height\(300\.dp\)\s*\)\s*\}''',
+              '''                item {
+                    TradingViewChart(
+                        symbol = signal.symbol,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(430.dp)
+                    )
+                }''',
+              s,
+              count=1
+          )
+          if n != 1: raise SystemExit("chart call regex not found")
+
+          s, n = re.subn(
+              r'''(?ms)^\s{12}Row\(horizontalArrangement = Arrangement\.spacedBy\(8\.dp\)\) \{\s*Button\(onClick = \{.*?Text\("Tiger\.com"\)\s*\}\s*\}''',
+              '''            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Button(
+                    modifier = Modifier.weight(1f),
+                    onClick = {
+                        val clip = ClipData.newPlainText("symbol", signal.symbol)
+                        context.getSystemService(ClipboardManager::class.java)?.setPrimaryClip(clip)
+                    }
+                ) {
+                    Icon(Icons.Default.ContentCopy, null)
+                    Spacer(Modifier.width(6.dp))
+                    Text("Копировать", maxLines = 1)
+                }
+                OutlinedButton(
+                    modifier = Modifier.weight(1f),
+                    onClick = {
+                        val intent = Intent(Intent.ACTION_VIEW, Uri.parse("https://www.tiger.com/terminal"))
+                        context.startActivity(intent)
+                    }
+                ) {
+                    Icon(Icons.Default.OpenInNew, null)
+                    Spacer(Modifier.width(6.dp))
+                    Text("Tiger.com", maxLines = 1)
+                }
+            }''',
+              s,
+              count=1
+          )
+          if n != 1: raise SystemExit("buttons regex not found")
+
+          start=s.index('@Composable\nprivate fun CandlestickChart')
+          end=s.index('\nprivate fun one', start)
+          widget=r'''@Composable
+          private fun TradingViewChart(symbol: String, modifier: Modifier = Modifier) {
+              ElevatedCard(modifier = modifier) {
+                  AndroidView(
+                      modifier = Modifier.fillMaxSize(),
+                      factory = { context ->
+                          WebView(context).apply {
+                              setBackgroundColor(android.graphics.Color.rgb(15, 17, 23))
+                              webViewClient = WebViewClient()
+                              settings.javaScriptEnabled = true
+                              settings.domStorageEnabled = true
+                              settings.cacheMode = WebSettings.LOAD_DEFAULT
+                              settings.mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
+                              settings.setSupportZoom(false)
+                              settings.builtInZoomControls = false
+                              CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
+                              tag = symbol
+                              loadDataWithBaseURL(
+                                  "https://s3.tradingview.com/",
+                                  tradingViewHtml(symbol),
+                                  "text/html",
+                                  "UTF-8",
+                                  null
+                              )
+                          }
+                      },
+                      update = { webView ->
+                          if (webView.tag != symbol) {
+                              webView.tag = symbol
+                              webView.loadDataWithBaseURL(
+                                  "https://s3.tradingview.com/",
+                                  tradingViewHtml(symbol),
+                                  "text/html",
+                                  "UTF-8",
+                                  null
+                              )
+                          }
+                      }
+                  )
+              }
+          }
+
+          private fun tradingViewHtml(symbol: String): String {
+              val tvSymbol = "BINANCE:${symbol.uppercase()}.P"
+              return """
+                  <!doctype html>
+                  <html>
+                  <head>
+                    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+                    <style>
+                      html, body, .tradingview-widget-container, .tradingview-widget-container__widget {
+                        width: 100%; height: 100%; margin: 0; padding: 0; overflow: hidden; background: #0f1117;
+                      }
+                    </style>
+                  </head>
+                  <body>
+                    <div class="tradingview-widget-container">
+                      <div class="tradingview-widget-container__widget"></div>
+                      <script type="text/javascript" src="https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js" async>
+                      {
+                        "autosize": true,
+                        "symbol": "$tvSymbol",
+                        "interval": "1",
+                        "timezone": "Etc/UTC",
+                        "theme": "dark",
+                        "style": "1",
+                        "locale": "ru",
+                        "allow_symbol_change": false,
+                        "hide_top_toolbar": false,
+                        "hide_legend": false,
+                        "save_image": false,
+                        "calendar": false,
+                        "support_host": "https://www.tradingview.com"
+                      }
+                      </script>
+                    </div>
+                  </body>
+                  </html>
+              """.trimIndent()
+          }
+          '''
+          s=s[:start]+widget+s[end:]
+          s=s.replace('item { SignalHero(signal) }','item { SignalHero(signal, state.websocketConnected) }')
+          s=s.replace('private fun SignalHero(signal: ScalpingSignal) {','private fun SignalHero(signal: ScalpingSignal, websocketLive: Boolean) {')
+          s=s.replace('Stat("LIVE Δ", "${signed(signal.liveFlowDeltaPct)}%")','Stat("LIVE Δ", if (websocketLive) "${signed(signal.liveFlowDeltaPct)}%" else "—")')
+          p.write_text(s, encoding="utf-8")
+
+          # Stable reconnecting Binance WebSocket
+          p=root/"app/src/main/java/com/scalpsignal/mobile/data/BinanceTradeStream.kt"
+          p.write_text(r'''package com.scalpsignal.mobile.data
+
+          import okhttp3.OkHttpClient
+          import okhttp3.Request
+          import okhttp3.Response
+          import okhttp3.WebSocket
+          import okhttp3.WebSocketListener
+          import org.json.JSONObject
+          import java.util.concurrent.Executors
+          import java.util.concurrent.ScheduledFuture
+          import java.util.concurrent.TimeUnit
+          import java.util.concurrent.atomic.AtomicBoolean
+          import java.util.concurrent.atomic.AtomicLong
+          import kotlin.math.min
+
+          class BinanceTradeStream(
+              private val tracker: MicrostructureTracker,
+              private val onConnection: (Boolean, String) -> Unit
+          ) {
+              private val client = OkHttpClient.Builder()
+                  .pingInterval(30, TimeUnit.SECONDS)
+                  .connectTimeout(12, TimeUnit.SECONDS)
+                  .readTimeout(0, TimeUnit.MILLISECONDS)
+                  .retryOnConnectionFailure(true)
+                  .build()
+
+              private val scheduler = Executors.newSingleThreadScheduledExecutor()
+              private var reconnectFuture: ScheduledFuture<*>? = null
+              private var socket: WebSocket? = null
+              private val connected = AtomicBoolean(false)
+              private val requestId = AtomicLong(1)
+              @Volatile private var desiredSymbols: Set<String> = emptySet()
+              @Volatile private var manualClose = false
+              @Volatile private var reconnectAttempt = 0
+
+              fun isConnected(): Boolean = connected.get()
+
+              @Synchronized
+              fun connect(symbols: Collection<String>) {
+                  desiredSymbols = symbols.map { it.lowercase() }.toSet()
+                  manualClose = false
+                  reconnectFuture?.cancel(false)
+                  reconnectFuture = null
+                  if (connected.get() && socket != null) {
+                      updateSymbols(desiredSymbols)
+                      return
+                  }
+                  openSocket()
+              }
+
+              @Synchronized
+              fun updateSymbols(symbols: Collection<String>) {
+                  val next = symbols.map { it.lowercase() }.toSet()
+                  val previous = desiredSymbols
+                  desiredSymbols = next
+                  if (!connected.get() || socket == null) {
+                      scheduleReconnect(0)
+                      return
+                  }
+                  val remove = previous - next
+                  val add = next - previous
+                  if (remove.isNotEmpty()) send(socket, "UNSUBSCRIBE", remove)
+                  if (add.isNotEmpty()) send(socket, "SUBSCRIBE", add)
+              }
+
+              @Synchronized
+              fun close() {
+                  manualClose = true
+                  reconnectFuture?.cancel(false)
+                  reconnectFuture = null
+                  connected.set(false)
+                  val current = socket
+                  socket = null
+                  current?.close(1000, "scanner stopped")
+                  onConnection(false, "WebSocket остановлен")
+              }
+
+              @Synchronized
+              private fun openSocket() {
+                  if (manualClose || desiredSymbols.isEmpty()) return
+                  val old = socket
+                  socket = null
+                  old?.cancel()
+                  connected.set(false)
+                  onConnection(false, "WebSocket подключается…")
+                  val request = Request.Builder().url("wss://fstream.binance.com/ws").build()
+                  val newSocket = client.newWebSocket(request, listener())
+                  socket = newSocket
+              }
+
+              @Synchronized
+              private fun scheduleReconnect(delaySeconds: Long? = null) {
+                  if (manualClose || desiredSymbols.isEmpty()) return
+                  if (reconnectFuture?.isDone == false) return
+                  val delay = delaySeconds ?: min(30L, 1L shl min(reconnectAttempt, 5))
+                  reconnectAttempt = min(reconnectAttempt + 1, 6)
+                  onConnection(false, "WebSocket reconnect ${delay}s")
+                  reconnectFuture = scheduler.schedule({
+                      synchronized(this) {
+                          reconnectFuture = null
+                          if (!manualClose) openSocket()
+                      }
+                  }, delay, TimeUnit.SECONDS)
+              }
+
+              private fun send(target: WebSocket?, method: String, symbols: Collection<String>) {
+                  if (target == null || symbols.isEmpty()) return
+                  val params = symbols.map { "$it@aggTrade" }
+                  val json = JSONObject()
+                      .put("method", method)
+                      .put("params", params)
+                      .put("id", requestId.getAndIncrement())
+                  target.send(json.toString())
+              }
+
+              private fun listener() = object : WebSocketListener() {
+                  override fun onOpen(webSocket: WebSocket, response: Response) {
+                      synchronized(this@BinanceTradeStream) {
+                          if (webSocket !== socket || manualClose) {
+                              webSocket.close(1000, "stale socket")
+                              return
+                          }
+                          connected.set(true)
+                          reconnectAttempt = 0
+                          reconnectFuture?.cancel(false)
+                          reconnectFuture = null
+                      }
+                      onConnection(true, "WebSocket LIVE")
+                      send(webSocket, "SUBSCRIBE", desiredSymbols)
+                  }
+
+                  override fun onMessage(webSocket: WebSocket, text: String) {
+                      if (webSocket !== socket) return
+                      runCatching {
+                          val o = JSONObject(text)
+                          if (o.optString("e") != "aggTrade") return
+                          val symbol = o.optString("s")
+                          val price = o.optString("p").toDoubleOrNull() ?: return
+                          val qty = o.optString("q").toDoubleOrNull() ?: return
+                          val buyerIsMaker = o.optBoolean("m", false)
+                          val time = o.optLong("T", System.currentTimeMillis())
+                          tracker.add(symbol, AggTradeTick(time, price * qty, buyerAggressor = !buyerIsMaker))
+                      }
+                  }
+
+                  override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
+                      if (webSocket !== socket) return
+                      connected.set(false)
+                      webSocket.close(code, reason)
+                      if (!manualClose) scheduleReconnect()
+                  }
+
+                  override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+                      synchronized(this@BinanceTradeStream) {
+                          if (webSocket !== socket) return
+                          connected.set(false)
+                          socket = null
+                      }
+                      if (!manualClose) scheduleReconnect()
+                  }
+
+                  override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                      synchronized(this@BinanceTradeStream) {
+                          if (webSocket !== socket) return
+                          connected.set(false)
+                          socket = null
+                      }
+                      if (!manualClose) scheduleReconnect()
+                  }
+              }
+          }
+          ''', encoding="utf-8")
+
+          # Repository: never overwrite trading status with transient WS text
+          p=root/"app/src/main/java/com/scalpsignal/mobile/ScannerRepository.kt"
+          s=p.read_text(encoding="utf-8")
+          s=s.replace('    val websocketConnected: Boolean = false,\n', '    val websocketConnected: Boolean = false,\n    val websocketStatus: String = "OFF",\n')
+          old='''    private val stream = BinanceTradeStream(tracker) { connected, message ->
+                  _ui.value = _ui.value.copy(websocketConnected = connected, status = if (connected) _ui.value.status else message)
+              }'''
+          new='''    private val stream = BinanceTradeStream(tracker) { connected, message ->
+                  _ui.value = _ui.value.copy(
+                      websocketConnected = connected,
+                      websocketStatus = if (connected) "LIVE" else message
+                  )
+              }'''
+          if old not in s: raise SystemExit("stream callback not found")
+          s=s.replace(old,new)
+          p.write_text(s, encoding="utf-8")
+
+          # UI label
+          p=root/"app/src/main/java/com/scalpsignal/mobile/MainActivity.kt"
+          s=p.read_text(encoding="utf-8").replace('Stat("WS", if (state.websocketConnected) "LIVE" else "OFF")','Stat("WS", if (state.websocketConnected) "LIVE" else "RETRY")')
+          p.write_text(s, encoding="utf-8")
+
+          # Signal quality: no confirmed NEW without fresh live tape
+          p=root/"app/src/main/java/com/scalpsignal/mobile/domain/SignalEngine.kt"
+          s=p.read_text(encoding="utf-8")
+          s=s.replace(
+              '''        val confirmed = crossed && normalized >= 76 && volumeRatio >= 1.35 &&
+                      (liveDeltaAligned >= 6.0 || candleDeltaAligned >= 12.0) &&
+                      (tf3Aligned || tf5Aligned) && !(market.shock && !marketAligned)''',
+              '''        val liveFlowFresh = flow.updatedAt > 0L && System.currentTimeMillis() - flow.updatedAt <= 20_000L
+                  val strongLevel = level.touches >= 2 || (normalized >= 88 && volumeRatio >= 2.2 && liveDeltaAligned >= 20.0)
+                  val confirmed = crossed && distanceAtr in 0.04..1.10 && normalized >= 76 && volumeRatio >= 1.35 &&
+                      strongLevel && liveFlowFresh && (liveDeltaAligned >= 6.0 || bigPlayerAligned) &&
+                      (tf3Aligned || tf5Aligned) && !(market.shock && !marketAligned)'''
+          )
+          s=s.replace(
+              '''        val confirmed = crossed && distanceAtr in 0.04..1.10 && normalized >= 76 && volumeRatio >= 1.35 &&
+                      (liveDeltaAligned >= 6.0 || candleDeltaAligned >= 12.0) &&
+                      (tf3Aligned || tf5Aligned) && !(market.shock && !marketAligned)''',
+              '''        val liveFlowFresh = flow.updatedAt > 0L && System.currentTimeMillis() - flow.updatedAt <= 20_000L
+                  val confirmed = crossed && distanceAtr in 0.04..1.10 && normalized >= 76 && volumeRatio >= 1.35 &&
+                      liveFlowFresh && (liveDeltaAligned >= 6.0 || bigPlayerAligned) &&
+                      (tf3Aligned || tf5Aligned) && !(market.shock && !marketAligned)'''
+          )
+          if 'liveFlowFresh' not in s: raise SystemExit("live flow patch failed")
+          p.write_text(s, encoding="utf-8")
+          PY
+
+          grep -q 'versionName = "0.3.1-TV"' ScalpSignalAndroid/app/build.gradle.kts
+          grep -q 'applicationId = "com.scalpsignal.mobile.tv"' ScalpSignalAndroid/app/build.gradle.kts
+          grep -q 'android:label="Scalp Signal TV"' ScalpSignalAndroid/app/src/main/AndroidManifest.xml
+          grep -q 'TradingViewChart' ScalpSignalAndroid/app/src/main/java/com/scalpsignal/mobile/MainActivity.kt
+          grep -q 'liveFlowFresh' ScalpSignalAndroid/app/src/main/java/com/scalpsignal/mobile/domain/SignalEngine.kt
+          grep -q 'strongLevel' ScalpSignalAndroid/app/src/main/java/com/scalpsignal/mobile/domain/SignalEngine.kt
+          grep -q 'scheduleReconnect' ScalpSignalAndroid/app/src/main/java/com/scalpsignal/mobile/data/BinanceTradeStream.kt
+
+      - name: Patch v0.4 official TradingView Android wrapper
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          root=Path("ScalpSignalAndroid")
+
+          # Version / package / official TradingView Android dependency
+          p=root/"app/build.gradle.kts"
+          s=p.read_text(encoding="utf-8")
+          s=s.replace('versionCode = 31','versionCode = 40')
+          s=s.replace('versionName = "0.3.1-TV"','versionName = "0.4.0-TV-NATIVE"')
+          s=s.replace('applicationId = "com.scalpsignal.mobile.tv"','applicationId = "com.scalpsignal.mobile.tvnative"')
+          if 'com.tradingview:lightweightcharts:5.2.0' not in s:
+              s=s.replace(
+                  '    implementation("com.squareup.okhttp3:okhttp:4.12.0")',
+                  '    implementation("com.squareup.okhttp3:okhttp:4.12.0")\n    implementation("com.tradingview:lightweightcharts:5.2.0")'
+              )
+          p.write_text(s, encoding="utf-8")
+
+          p=root/"app/src/main/AndroidManifest.xml"
+          s=p.read_text(encoding="utf-8")
+          s=s.replace('android:label="Scalp Signal TV"','android:label="Scalp Signal TV Native"')
+          p.write_text(s, encoding="utf-8")
+
+          p=root/"app/src/main/java/com/scalpsignal/mobile/MainActivity.kt"
+          s=p.read_text(encoding="utf-8")
+          s=s.replace('Text("SCALP SIGNAL", fontWeight = FontWeight.Black)', 'Text("SCALP SIGNAL TV", fontWeight = FontWeight.Black)')
+          s, n = re.subn(
+              r'''(?ms)TradingViewChart\(\s*symbol\s*=\s*signal\.symbol,\s*modifier\s*=\s*Modifier\s*\.fillMaxWidth\(\)\s*\.height\(430\.dp\)\s*\)''',
+              '''NativeTradingViewChart(
+                        symbol = signal.symbol,
+                        candles = state.selectedCandles,
+                        signal = signal,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(430.dp)
+                    )''',
+              s,
+              count=1
+          )
+          if n != 1:
+              raise SystemExit("TradingView call regex not found")
+          p.write_text(s, encoding="utf-8")
+
+          native = r'''package com.scalpsignal.mobile
+
+          import android.content.Intent
+          import android.graphics.Color as AndroidColor
+          import android.net.Uri
+          import androidx.compose.foundation.layout.Box
+          import androidx.compose.foundation.layout.Column
+          import androidx.compose.foundation.layout.fillMaxSize
+          import androidx.compose.foundation.layout.fillMaxWidth
+          import androidx.compose.foundation.layout.padding
+          import androidx.compose.material3.Button
+          import androidx.compose.material3.ElevatedCard
+          import androidx.compose.material3.MaterialTheme
+          import androidx.compose.material3.Text
+          import androidx.compose.material3.TextButton
+          import androidx.compose.runtime.Composable
+          import androidx.compose.runtime.getValue
+          import androidx.compose.runtime.mutableStateOf
+          import androidx.compose.runtime.remember
+          import androidx.compose.runtime.setValue
+          import androidx.compose.ui.Alignment
+          import androidx.compose.ui.Modifier
+          import androidx.compose.ui.platform.LocalContext
+          import androidx.compose.ui.unit.dp
+          import androidx.compose.ui.viewinterop.AndroidView
+          import com.scalpsignal.mobile.domain.Candle
+          import com.scalpsignal.mobile.domain.ScalpingSignal
+          import com.tradingview.lightweightcharts.api.chart.models.color.surface.SolidColor
+          import com.tradingview.lightweightcharts.api.chart.models.color.toIntColor
+          import com.tradingview.lightweightcharts.api.interfaces.SeriesApi
+          import com.tradingview.lightweightcharts.api.options.models.CandlestickSeriesOptions
+          import com.tradingview.lightweightcharts.api.options.models.PriceLineOptions
+          import com.tradingview.lightweightcharts.api.options.models.gridLineOptions
+          import com.tradingview.lightweightcharts.api.options.models.gridOptions
+          import com.tradingview.lightweightcharts.api.options.models.layoutOptions
+          import com.tradingview.lightweightcharts.api.options.models.priceScaleOptions
+          import com.tradingview.lightweightcharts.api.options.models.timeScaleOptions
+          import com.tradingview.lightweightcharts.api.series.common.PriceLine
+          import com.tradingview.lightweightcharts.api.series.common.SeriesData
+          import com.tradingview.lightweightcharts.api.series.enums.LineStyle
+          import com.tradingview.lightweightcharts.api.series.enums.LineWidth
+          import com.tradingview.lightweightcharts.api.series.models.CandlestickData
+          import com.tradingview.lightweightcharts.api.series.models.Time
+          import com.tradingview.lightweightcharts.view.ChartsView
+
+          private class NativeTvHolder {
+              var series: SeriesApi? = null
+              var pending: List<SeriesData> = emptyList()
+              var symbol: String = ""
+              var fittedSymbol: String = ""
+              var signalKey: String = ""
+              val priceLines = mutableListOf<PriceLine>()
+          }
+
+          @Composable
+          fun NativeTradingViewChart(
+              symbol: String,
+              candles: List<Candle>,
+              signal: ScalpingSignal,
+              modifier: Modifier = Modifier,
+          ) {
+              val context = LocalContext.current
+              var chartError by remember(symbol) { mutableStateOf<String?>(null) }
+
+              Column(modifier = Modifier.fillMaxWidth()) {
+                  ElevatedCard(modifier = modifier) {
+                      Box(modifier = Modifier.fillMaxSize()) {
+                          AndroidView(
+                              modifier = Modifier.fillMaxSize(),
+                              factory = { viewContext ->
+                                  ChartsView(viewContext).apply {
+                                      val holder = NativeTvHolder()
+                                      tag = holder
+
+                                      subscribeOnChartStateChange { state ->
+                                          when (state) {
+                                              is ChartsView.State.Preparing -> Unit
+                                              is ChartsView.State.Error -> {
+                                                  chartError = state.exception.localizedMessage ?: "TradingView WebView error"
+                                              }
+                                              is ChartsView.State.Ready -> {
+                                                  chartError = null
+
+                                                  api.applyOptions {
+                                                      layout = layoutOptions {
+                                                          background = SolidColor(AndroidColor.rgb(15, 17, 23).toIntColor())
+                                                          textColor = AndroidColor.rgb(185, 193, 207).toIntColor()
+                                                          attributionLogo = true
+                                                      }
+                                                      timeScale = timeScaleOptions {
+                                                          timeVisible = true
+                                                          secondsVisible = false
+                                                          rightOffset = 8f
+                                                          fixRightEdge = false
+                                                          rightBarStaysOnScroll = false
+                                                          borderColor = AndroidColor.rgb(47, 54, 68).toIntColor()
+                                                      }
+                                                      rightPriceScale = priceScaleOptions {
+                                                          borderVisible = true
+                                                          borderColor = AndroidColor.rgb(47, 54, 68).toIntColor()
+                                                      }
+                                                      grid = gridOptions {
+                                                          horzLines = gridLineOptions {
+                                                              color = AndroidColor.rgb(31, 37, 48).toIntColor()
+                                                          }
+                                                          vertLines = gridLineOptions {
+                                                              color = AndroidColor.rgb(31, 37, 48).toIntColor()
+                                                          }
+                                                      }
+                                                  }
+
+                                                  if (holder.series == null) {
+                                                      api.addCandlestickSeries(
+                                                          options = CandlestickSeriesOptions(
+                                                              upColor = AndroidColor.rgb(99, 230, 190).toIntColor(),
+                                                              downColor = AndroidColor.rgb(255, 135, 135).toIntColor(),
+                                                              wickUpColor = AndroidColor.rgb(99, 230, 190).toIntColor(),
+                                                              wickDownColor = AndroidColor.rgb(255, 135, 135).toIntColor(),
+                                                              borderVisible = false,
+                                                          ),
+                                                          onSeriesCreated = { series ->
+                                                              holder.series = series
+                                                              if (holder.pending.isNotEmpty()) {
+                                                                  series.setData(holder.pending)
+                                                                  updateSignalLines(holder, signal)
+                                                                  api.timeScale.fitContent()
+                                                                  api.timeScale.applyOptions {
+                                                                      rightOffset = 8f
+                                                                      fixRightEdge = false
+                                                                  }
+                                                                  holder.fittedSymbol = holder.symbol
+                                                              }
+                                                          }
+                                                      )
+                                                  }
+                                              }
+                                          }
+                                      }
+                                  }
+                              },
+                              update = { chart ->
+                                  val holder = chart.tag as NativeTvHolder
+                                  holder.pending = candles
+                                      .sortedBy { it.openTime }
+                                      .map { candle ->
+                                          CandlestickData(
+                                              time = Time.Utc(candle.openTime / 1000L),
+                                              open = candle.open.toFloat(),
+                                              high = candle.high.toFloat(),
+                                              low = candle.low.toFloat(),
+                                              close = candle.close.toFloat(),
+                                          )
+                                      }
+
+                                  val symbolChanged = holder.symbol != symbol
+                                  if (symbolChanged) {
+                                      holder.symbol = symbol
+                                      holder.fittedSymbol = ""
+                                      holder.signalKey = ""
+                                  }
+
+                                  holder.series?.let { series ->
+                                      if (holder.pending.isNotEmpty()) {
+                                          series.setData(holder.pending)
+                                      }
+                                      updateSignalLines(holder, signal)
+                                      if (holder.fittedSymbol != symbol && holder.pending.isNotEmpty()) {
+                                          chart.api.timeScale.fitContent()
+                                          chart.api.timeScale.applyOptions {
+                                              rightOffset = 8f
+                                              fixRightEdge = false
+                                          }
+                                          holder.fittedSymbol = symbol
+                                      }
+                                  }
+                              }
+                          )
+
+                          chartError?.let { message ->
+                              Column(
+                                  modifier = Modifier
+                                      .align(Alignment.Center)
+                                      .padding(20.dp),
+                                  horizontalAlignment = Alignment.CenterHorizontally
+                              ) {
+                                  Text(
+                                      "TradingView не может запуститься",
+                                      style = MaterialTheme.typography.titleMedium
+                                  )
+                                  Text(
+                                      message,
+                                      modifier = Modifier.padding(top = 8.dp),
+                                      style = MaterialTheme.typography.bodySmall
+                                  )
+                                  Button(
+                                      modifier = Modifier.padding(top = 12.dp),
+                                      onClick = {
+                                          context.startActivity(
+                                              Intent(
+                                                  Intent.ACTION_VIEW,
+                                                  Uri.parse("https://play.google.com/store/apps/details?id=com.google.android.webview")
+                                              )
+                                          )
+                                      }
+                                  ) {
+                                      Text("Обновить Android System WebView")
+                                  }
+                              }
+                          }
+                      }
+                  }
+
+                  TextButton(
+                      onClick = {
+                          context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://www.tradingview.com/")))
+                      }
+                  ) {
+                      Text("Powered by TradingView")
+                  }
+              }
+          }
+
+          private fun updateSignalLines(holder: NativeTvHolder, signal: ScalpingSignal) {
+              val series = holder.series ?: return
+              if (holder.signalKey == signal.signalId) return
+
+              holder.priceLines.forEach { line -> series.removePriceLine(line) }
+              holder.priceLines.clear()
+
+              fun add(
+                  id: String,
+                  title: String,
+                  value: Double,
+                  color: Int,
+                  style: LineStyle,
+              ) {
+                  holder.priceLines += series.createPriceLine(
+                      PriceLineOptions(
+                          id = id,
+                          price = value.toFloat(),
+                          color = color.toIntColor(),
+                          lineWidth = LineWidth.ONE,
+                          lineStyle = style,
+                          lineVisible = true,
+                          axisLabelVisible = true,
+                          title = title,
+                      )
+                  )
+              }
+
+              add("level", "LEVEL", signal.level, AndroidColor.rgb(245, 197, 66), LineStyle.DASHED)
+              add("entry", "ENTRY", signal.entry, AndroidColor.rgb(116, 192, 252), LineStyle.SOLID)
+              add("sl", "SL", signal.stopLoss, AndroidColor.rgb(255, 107, 107), LineStyle.DASHED)
+              add("tp1", "TP1", signal.tp1, AndroidColor.rgb(99, 230, 190), LineStyle.DOTTED)
+              add("tp2", "TP2", signal.tp2, AndroidColor.rgb(56, 217, 169), LineStyle.DOTTED)
+
+              holder.signalKey = signal.signalId
+          }
+          '''
+          p=root/"app/src/main/java/com/scalpsignal/mobile/NativeTradingViewChart.kt"
+          p.write_text(native, encoding="utf-8")
+          PY
+
+          grep -q 'versionName = "0.4.0-TV-NATIVE"' ScalpSignalAndroid/app/build.gradle.kts
+          grep -q 'com.tradingview:lightweightcharts:5.2.0' ScalpSignalAndroid/app/build.gradle.kts
+          grep -q 'applicationId = "com.scalpsignal.mobile.tvnative"' ScalpSignalAndroid/app/build.gradle.kts
+          grep -q 'NativeTradingViewChart' ScalpSignalAndroid/app/src/main/java/com/scalpsignal/mobile/MainActivity.kt
+          grep -q 'class NativeTvHolder' ScalpSignalAndroid/app/src/main/java/com/scalpsignal/mobile/NativeTradingViewChart.kt
+
+      - name: Patch v0.4.1 precision UI and REST flow fallback
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          root=Path("ScalpSignalAndroid")
+
+          # Distinct installable build
+          p=root/"app/build.gradle.kts"
+          s=p.read_text(encoding="utf-8")
+          s=s.replace('versionCode = 40','versionCode = 41')
+          s=s.replace('versionName = "0.4.0-TV-NATIVE"','versionName = "0.4.1-TV-NATIVE"')
+          s=s.replace('applicationId = "com.scalpsignal.mobile.tvnative"','applicationId = "com.scalpsignal.mobile.tvnative041"')
+          p.write_text(s, encoding="utf-8")
+
+          p=root/"app/src/main/AndroidManifest.xml"
+          s=p.read_text(encoding="utf-8")
+          s=s.replace('android:label="Scalp Signal TV Native"','android:label="Scalp Signal TV 0.4.1"')
+          p.write_text(s, encoding="utf-8")
+
+          # Price precision, cleaner levels, better axes.
+          p=root/"app/src/main/java/com/scalpsignal/mobile/NativeTradingViewChart.kt"
+          s=p.read_text(encoding="utf-8")
+          s=s.replace(
+              'import com.tradingview.lightweightcharts.api.series.models.CandlestickData\n',
+              'import com.tradingview.lightweightcharts.api.series.models.CandlestickData\nimport com.tradingview.lightweightcharts.api.series.models.PriceFormat\n'
+          )
+
+          s=s.replace(
+              '''                                                      timeScale = timeScaleOptions {
+                                                          timeVisible = true
+                                                          secondsVisible = false
+                                                          rightOffset = 8f
+                                                          fixRightEdge = false
+                                                          rightBarStaysOnScroll = false
+                                                          borderColor = AndroidColor.rgb(47, 54, 68).toIntColor()
+                                                      }
+                                                      rightPriceScale = priceScaleOptions {
+                                                          borderVisible = true
+                                                          borderColor = AndroidColor.rgb(47, 54, 68).toIntColor()
+                                                      }''',
+              '''                                                      timeScale = timeScaleOptions {
+                                                          timeVisible = true
+                                                          secondsVisible = false
+                                                          rightOffsetPixels = 56f
+                                                          barSpacing = 7f
+                                                          minBarSpacing = 2f
+                                                          fixLeftEdge = false
+                                                          fixRightEdge = false
+                                                          rightBarStaysOnScroll = false
+                                                          shiftVisibleRangeOnNewBar = false
+                                                          borderColor = AndroidColor.rgb(47, 54, 68).toIntColor()
+                                                          minimumHeight = 36
+                                                          tickMarkMaxCharacterLength = 5
+                                                      }
+                                                      rightPriceScale = priceScaleOptions {
+                                                          autoScale = true
+                                                          alignLabels = true
+                                                          entireTextOnly = true
+                                                          borderVisible = true
+                                                          minimumWidth = 72
+                                                          ensureEdgeTickMarksVisible = true
+                                                          borderColor = AndroidColor.rgb(47, 54, 68).toIntColor()
+                                                      }'''
+          )
+
+          s=s.replace(
+              '''                                                              borderVisible = false,
+                                                          ),''',
+              '''                                                              borderVisible = false,
+                                                              priceFormat = priceFormatFor(signal.entry),
+                                                          ),''',
+              1
+          )
+
+          s=s.replace(
+              '''                                                                  api.timeScale.applyOptions {
+                                                                      rightOffset = 8f
+                                                                      fixRightEdge = false
+                                                                  }''',
+              '''                                                                  api.timeScale.applyOptions {
+                                                                      rightOffsetPixels = 56f
+                                                                      fixLeftEdge = false
+                                                                      fixRightEdge = false
+                                                                  }'''
+          )
+          s=s.replace(
+              '''                                          chart.api.timeScale.applyOptions {
+                                              rightOffset = 8f
+                                              fixRightEdge = false
+                                          }''',
+              '''                                          series.applyOptions(
+                                              CandlestickSeriesOptions(priceFormat = priceFormatFor(signal.entry))
+                                          )
+                                          chart.api.timeScale.applyOptions {
+                                              rightOffsetPixels = 56f
+                                              fixLeftEdge = false
+                                              fixRightEdge = false
+                                          }'''
+          )
+
+          s=s.replace('axisLabelVisible = true,','axisLabelVisible = false,')
+          s=s.replace('lineWidth = LineWidth.ONE,','lineWidth = if (id == "entry") LineWidth.TWO else LineWidth.ONE,')
+
+          insert='''
+
+          private fun priceFormatFor(price: Double): PriceFormat {
+              val precision = when {
+                  price >= 1000.0 -> 2
+                  price >= 100.0 -> 3
+                  price >= 1.0 -> 4
+                  price >= 0.1 -> 5
+                  price >= 0.01 -> 6
+                  price >= 0.001 -> 7
+                  else -> 8
+              }
+              val minMove = when (precision) {
+                  2 -> 0.01f
+                  3 -> 0.001f
+                  4 -> 0.0001f
+                  5 -> 0.00001f
+                  6 -> 0.000001f
+                  7 -> 0.0000001f
+                  else -> 0.00000001f
+              }
+              return PriceFormat.priceFormatBuiltIn(
+                  type = PriceFormat.Type.PRICE,
+                  precision = precision,
+                  minMove = minMove,
+              )
+          }
+          '''
+          if 'private fun priceFormatFor' not in s:
+              s += insert
+          p.write_text(s, encoding="utf-8")
+
+          # Trade IDs prevent REST fallback from double-counting the same aggTrades.
+          p=root/"app/src/main/java/com/scalpsignal/mobile/data/MicrostructureTracker.kt"
+          s=p.read_text(encoding="utf-8")
+          s=s.replace(
+              '''data class AggTradeTick(
+              val time: Long,
+              val notionalUsd: Double,
+              val buyerAggressor: Boolean
+          )''',
+              '''data class AggTradeTick(
+              val time: Long,
+              val notionalUsd: Double,
+              val buyerAggressor: Boolean,
+              val tradeId: Long = 0L
+          )'''
+          )
+          s=s.replace(
+              '    private val trades = ConcurrentHashMap<String, ArrayDeque<AggTradeTick>>()',
+              '    private val trades = ConcurrentHashMap<String, ArrayDeque<AggTradeTick>>()\n    private val lastTradeId = ConcurrentHashMap<String, Long>()'
+          )
+          s=s.replace(
+              '''    fun add(symbol: String, tick: AggTradeTick) {
+              val q = trades.computeIfAbsent(symbol) { ArrayDeque() }''',
+              '''    fun add(symbol: String, tick: AggTradeTick) {
+              if (tick.tradeId > 0L) {
+                  val previous = lastTradeId[symbol] ?: 0L
+                  if (tick.tradeId <= previous) return
+                  lastTradeId[symbol] = tick.tradeId
+              }
+              val q = trades.computeIfAbsent(symbol) { ArrayDeque() }'''
+          )
+          p.write_text(s, encoding="utf-8")
+
+          # WebSocket: include aggTrade ID for de-duplication.
+          p=root/"app/src/main/java/com/scalpsignal/mobile/data/BinanceTradeStream.kt"
+          s=p.read_text(encoding="utf-8")
+          s=s.replace(
+              '''                          val buyerIsMaker = o.optBoolean("m", false)
+                          val time = o.optLong("T", System.currentTimeMillis())
+                          tracker.add(symbol, AggTradeTick(time, price * qty, buyerAggressor = !buyerIsMaker))''',
+              '''                          val buyerIsMaker = o.optBoolean("m", false)
+                          val time = o.optLong("T", System.currentTimeMillis())
+                          val tradeId = o.optLong("a", 0L)
+                          tracker.add(symbol, AggTradeTick(time, price * qty, buyerAggressor = !buyerIsMaker, tradeId = tradeId))'''
+          )
+          p.write_text(s, encoding="utf-8")
+
+          # REST aggTrades fallback.
+          p=root/"app/src/main/java/com/scalpsignal/mobile/data/BinanceApi.kt"
+          s=p.read_text(encoding="utf-8")
+          needle='''    private fun get(url: String): String {'''
+          method='''    suspend fun loadRecentAggTrades(symbol: String, limit: Int = 200): List<AggTradeTick> =
+              withContext(Dispatchers.IO) {
+                  val safeLimit = limit.coerceIn(20, 500)
+                  val raw = get("$baseUrl/fapi/v1/aggTrades?symbol=$symbol&limit=$safeLimit")
+                  val arr = JSONArray(raw)
+                  buildList {
+                      for (i in 0 until arr.length()) {
+                          val o = arr.getJSONObject(i)
+                          val price = o.optString("p").toDoubleOrNull() ?: continue
+                          val qty = o.optString("q").toDoubleOrNull() ?: continue
+                          add(
+                              AggTradeTick(
+                                  time = o.optLong("T", System.currentTimeMillis()),
+                                  notionalUsd = price * qty,
+                                  buyerAggressor = !o.optBoolean("m", false),
+                                  tradeId = o.optLong("a", 0L)
+                              )
+                          )
+                      }
+                  }
+              }
+
+          '''
+          if 'loadRecentAggTrades' not in s:
+              s=s.replace(needle, method+needle)
+          p.write_text(s, encoding="utf-8")
+
+          # Scanner state + fallback for the best candidates only.
+          p=root/"app/src/main/java/com/scalpsignal/mobile/ScannerRepository.kt"
+          s=p.read_text(encoding="utf-8")
+          s=s.replace(
+              '    val websocketStatus: String = "OFF",\n',
+              '    val websocketStatus: String = "OFF",\n    val restFlowActive: Boolean = false,\n'
+          )
+          s=s.replace(
+              '''            websocketConnected = connected,
+              websocketStatus = if (connected) "LIVE" else message''',
+              '''            websocketConnected = connected,
+              websocketStatus = if (connected) "LIVE" else message,
+              restFlowActive = if (connected) false else _ui.value.restFlowActive'''
+          )
+
+          old='''        val analyzed = cachedUniverse.map { market ->
+              scope.async {
+                  semaphore.withPermit {
+                      runCatching {
+                          val candles = if (market.symbol == "BTCUSDT" && btcCandles.isNotEmpty()) btcCandles
+                          else api.loadKlines(market.symbol, "1m", 150)
+                          candlesBySymbol[market.symbol] = candles
+                          SignalEngine.analyze(market.symbol, candles, tracker.snapshot(market.symbol), regime, now)
+                      }.getOrNull()
+                  }
+              }
+          }.awaitAll().filterNotNull()
+
+          val stateful = applyLifecycle(analyzed, now)'''
+          new='''        var analyzed = cachedUniverse.map { market ->
+              scope.async {
+                  semaphore.withPermit {
+                      runCatching {
+                          val candles = if (market.symbol == "BTCUSDT" && btcCandles.isNotEmpty()) btcCandles
+                          else api.loadKlines(market.symbol, "1m", 150)
+                          candlesBySymbol[market.symbol] = candles
+                          SignalEngine.analyze(market.symbol, candles, tracker.snapshot(market.symbol), regime, now)
+                      }.getOrNull()
+                  }
+              }
+          }.awaitAll().filterNotNull()
+
+          var restFlowActive = false
+          if (!stream.isConnected()) {
+              val fallbackSymbols = analyzed
+                  .filter { it.score >= 45 && it.volumeRatio >= 1.20 }
+                  .sortedWith(
+                      compareByDescending<ScalpingSignal> { it.volumeRatio }
+                          .thenByDescending { it.score }
+                  )
+                  .map { it.symbol }
+                  .distinct()
+                  .take(6)
+
+              if (fallbackSymbols.isNotEmpty()) {
+                  fallbackSymbols.map { symbol ->
+                      scope.async {
+                          semaphore.withPermit {
+                              runCatching {
+                                  api.loadRecentAggTrades(symbol, 240).forEach { tick ->
+                                      tracker.add(symbol, tick)
+                                  }
+                              }
+                          }
+                      }
+                  }.awaitAll()
+
+                  val fallbackSet = fallbackSymbols.toSet()
+                  analyzed = analyzed.map { oldSignal ->
+                      if (oldSignal.symbol !in fallbackSet) oldSignal
+                      else {
+                          val candles = candlesBySymbol[oldSignal.symbol].orEmpty()
+                          SignalEngine.analyze(
+                              oldSignal.symbol,
+                              candles,
+                              tracker.snapshot(oldSignal.symbol),
+                              regime,
+                              System.currentTimeMillis()
+                          ) ?: oldSignal
+                      }
+                  }
+                  restFlowActive = true
+              }
+          }
+
+          val stateful = applyLifecycle(analyzed, now)'''
+          if old not in s:
+              raise SystemExit("scanner analyze block not found")
+          s=s.replace(old,new)
+
+          s=s.replace(
+              '''            websocketConnected = false, status = "Сканер остановлен")''',
+              '''            websocketConnected = false, restFlowActive = false, status = "Сканер остановлен")'''
+          )
+
+          s=s.replace(
+              '''            lastScanMs = now,
+              status = when {''',
+              '''            lastScanMs = now,
+              restFlowActive = restFlowActive,
+              status = when {'''
+          )
+          p.write_text(s, encoding="utf-8")
+
+          # UI: FLOW can be WS or REST fallback, and LIVE delta reflects either.
+          p=root/"app/src/main/java/com/scalpsignal/mobile/MainActivity.kt"
+          s=p.read_text(encoding="utf-8")
+          s=s.replace(
+              'Stat("WS", if (state.websocketConnected) "LIVE" else "RETRY")',
+              'Stat("FLOW", when { state.websocketConnected -> "WS"; state.restFlowActive -> "REST"; else -> "RETRY" })'
+          )
+          s=s.replace(
+              'item { SignalHero(signal, state.websocketConnected) }',
+              'item { SignalHero(signal, state.websocketConnected || state.restFlowActive) }'
+          )
+          p.write_text(s, encoding="utf-8")
+          PY
+
+          grep -q 'versionName = "0.4.1-TV-NATIVE"' ScalpSignalAndroid/app/build.gradle.kts
+          grep -q 'applicationId = "com.scalpsignal.mobile.tvnative041"' ScalpSignalAndroid/app/build.gradle.kts
+          grep -q 'priceFormatFor' ScalpSignalAndroid/app/src/main/java/com/scalpsignal/mobile/NativeTradingViewChart.kt
+          grep -q 'axisLabelVisible = false' ScalpSignalAndroid/app/src/main/java/com/scalpsignal/mobile/NativeTradingViewChart.kt
+          grep -q 'loadRecentAggTrades' ScalpSignalAndroid/app/src/main/java/com/scalpsignal/mobile/data/BinanceApi.kt
+          grep -q 'restFlowActive' ScalpSignalAndroid/app/src/main/java/com/scalpsignal/mobile/ScannerRepository.kt
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Ensure Android SDK 36
+        shell: bash
+        run: |
+          SDKMANAGER="$(command -v sdkmanager || true)"
+          if [ -z "$SDKMANAGER" ] && [ -n "$ANDROID_HOME" ]; then
+            SDKMANAGER="$(find "$ANDROID_HOME/cmdline-tools" -type f -name sdkmanager 2>/dev/null | head -1)"
+          fi
+          test -x "$SDKMANAGER"
+          yes | "$SDKMANAGER" --licenses >/dev/null || true
+          "$SDKMANAGER" "platforms;android-36" "build-tools;36.0.0"
+
+      - name: Set up Gradle 8.13
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.13'
+
+      - name: Build APK
+        shell: bash
+        run: gradle --no-daemon -p ScalpSignalAndroid :app:assembleDebug
+
+      - name: Validate APK
+        shell: bash
+        run: |
+          APK="ScalpSignalAndroid/app/build/outputs/apk/debug/app-debug.apk"
+          test -s "$APK"
+          mkdir -p dist
+          cp "$APK" dist/ScalpSignal-TV-v0.4.1.apk
+          unzip -tq dist/ScalpSignal-TV-v0.4.1.apk
+          shasum -a 256 dist/ScalpSignal-TV-v0.4.1.apk
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: ScalpSignal-TV-v0.4.1-APK
+          path: dist/ScalpSignal-TV-v0.4.1.apk
+          if-no-files-found: error
+          retention-days: 7
