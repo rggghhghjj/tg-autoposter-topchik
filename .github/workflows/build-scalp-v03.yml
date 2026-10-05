@@ -31,6 +31,7 @@ jobs:
         run: |
           python3 - <<'PY'
           from pathlib import Path
+          import re
 
           root=Path("ScalpSignalAndroid")
 
@@ -46,45 +47,24 @@ jobs:
           s=s.replace('import android.net.Uri\n', 'import android.net.Uri\nimport android.webkit.CookieManager\nimport android.webkit.WebSettings\nimport android.webkit.WebView\nimport android.webkit.WebViewClient\n')
           s=s.replace('import androidx.compose.ui.platform.LocalContext\n', 'import androidx.compose.ui.platform.LocalContext\nimport androidx.compose.ui.viewinterop.AndroidView\n')
 
-          old='''                item {
-                    CandlestickChart(
-                        candles = state.selectedCandles,
-                        signal = signal,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(300.dp)
-                    )
-                }'''
-          new='''                item {
+          s, n = re.subn(
+              r'''(?ms)^\s{16}item \{\s*CandlestickChart\(\s*candles = state\.selectedCandles,\s*signal = signal,\s*modifier = Modifier\s*\.fillMaxWidth\(\)\s*\.height\(300\.dp\)\s*\)\s*\}''',
+              '''                item {
                     TradingViewChart(
                         symbol = signal.symbol,
                         modifier = Modifier
                             .fillMaxWidth()
                             .height(430.dp)
                     )
-                }'''
-          if old not in s: raise SystemExit("chart call not found")
-          s=s.replace(old,new)
+                }''',
+              s,
+              count=1
+          )
+          if n != 1: raise SystemExit("chart call regex not found")
 
-          old='''            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(onClick = {
-                    val clip = ClipData.newPlainText("symbol", signal.symbol)
-                    context.getSystemService(ClipboardManager::class.java)?.setPrimaryClip(clip)
-                }) {
-                    Icon(Icons.Default.ContentCopy, null)
-                    Spacer(Modifier.width(6.dp))
-                    Text("Копировать ${signal.symbol}")
-                }
-                OutlinedButton(onClick = {
-                    val intent = Intent(Intent.ACTION_VIEW, Uri.parse("https://www.tiger.com/terminal"))
-                    context.startActivity(intent)
-                }) {
-                    Icon(Icons.Default.OpenInNew, null)
-                    Spacer(Modifier.width(6.dp))
-                    Text("Tiger.com")
-                }
-            }'''
-          new='''            Row(
+          s, n = re.subn(
+              r'''(?ms)^\s{12}Row\(horizontalArrangement = Arrangement\.spacedBy\(8\.dp\)\) \{\s*Button\(onClick = \{.*?Text\("Tiger\.com"\)\s*\}\s*\}''',
+              '''            Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
@@ -110,9 +90,11 @@ jobs:
                     Spacer(Modifier.width(6.dp))
                     Text("Tiger.com", maxLines = 1)
                 }
-            }'''
-          if old not in s: raise SystemExit("buttons block not found")
-          s=s.replace(old,new)
+            }''',
+              s,
+              count=1
+          )
+          if n != 1: raise SystemExit("buttons regex not found")
 
           start=s.index('@Composable\nprivate fun CandlestickChart')
           end=s.index('\nprivate fun one', start)
